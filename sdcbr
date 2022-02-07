@@ -1,0 +1,229 @@
+#!/bin/bash
+######################
+# sdcbr
+# SD Card Backup and Restore
+#
+# Backs up an SD card interactively as a compressed image.
+# Restores a previously backed up compressed image to a similar size or larger SD card.
+# Suitable for backing up Raspberry Pi operating system cards.
+#
+######################
+dbg=0
+confirm() {
+params=( "$1" "$2" "$3" "$4" "$5" )
+let rval=3
+while [ $rval -gt 2 ];do
+    echo -ne ${params[0]}" "${params[1]}" "
+    ans=
+    rval=
+    read -n1 ans
+    if [ -z "$ans" ] || [ ${#ans} -gt 1 ];then
+        rval=3
+    else
+        case "$ans" in
+            [${params[2]}]*)
+                rval=0
+                ;;
+            [${params[3]}]*)
+                rval=1
+                ;;
+			[${params[4]}]*)
+                rval=2
+                ;;
+            *)
+                rval=3
+                ;;
+        esac
+    fi
+done
+    return $rval
+}
+
+listdrives() {
+# Read all the disks
+drives=($(fdisk -l 2>/dev/null | grep "Disk /dev" | grep -v ram | grep -v part| cut -d ' ' -f2|cut -d: -f1|tr '\n ' ' '))
+}
+
+detectusb() {
+while true; do
+echo
+if confirm "Make sure the USB stick or SD card is UNPLUGGED now. Ready?" "[Y/N]" "Yy" "Nn";then
+    listdrives
+    [[ $dbg == 1 ]] && echo ${drives[@]}
+    a=("${drives[@]}")
+    echo -n -e "\nPLUG IN the device to use now. (ESC to abort)\nDetecting."
+        while true; do
+            listdrives
+            [[ $dbg == 1 ]] && echo ${drives[@]}
+            b=("${drives[@]}")
+            read -s -n1 -t1 key
+            if [[ $key = $'\e' ]]; then
+                echo -e "\nBye!"
+                exit 1
+            else 
+                key=""
+            fi
+            (( ${#a[@]} != ${#b[@]} )) && break
+            [[ $dbg == 0 ]] &&  echo -n "."
+        done
+    ( (( ${#a[@]} > ${#b[@]} )) || [[ esc = 1 ]] ) && { echo; continue; }
+    echo
+    echo
+else
+    echo -e "\nBye!"; exit 0
+fi
+    for item1 in "${b[@]}"; do
+    for item2 in "${a[@]}"; do
+    found=0
+    if [[ "$item1" == "$item2" ]]; then
+        found=1; break
+    fi
+    done
+    [[ $found = 1 ]] && continue
+    DISK=$item1; break
+    done
+        echo -e "Detected device is $DISK which has the following structure:\n"
+        lsblk $DISK
+        break
+    done
+}
+
+get_dir() {
+user=$(users|grep -v root|cut -d ' ' -f1)
+DIR=
+if [[ -f /home/$user/.sdcbr_dir ]] && [[ -d "$(cat /home/$user/.sdcbr_dir)" ]]; then
+	DIR=$(cat /home/$user/.sdcbr_dir)
+	else
+		if confirm "Please select a default directory for your backups now OK?" "[Y/N]" "Yy" "Nn"; then
+			DIR=$(zenity --file-selection --directory 2> /dev/null)
+		fi
+	fi
+echo
+if confirm "Keep your default backup DIRECTORY as $DIR ?" "N/Y" "Nn" "Yy"; then
+DIR=$(zenity --file-selection --directory --filename=$DIR/ 2> /dev/null)
+sleep 0.5
+echo -e "\n\nYou selected $DIR"
+	if confirm "\nSave this directory as new default?" "[Y/N]" "Yy" "Nn"; then
+		echo $DIR > /home/$user/.sdcbr_dir
+	fi
+#echo -e "\n\nBackups will be saved to and restored from $DIR"
+else
+#[[ -f /home/$user/.sdcbr_dir ]] && DIR=$(cat /home/$user/.sdcbr_dir)
+    if [[ ${#DIR} = 0 ]]; then
+		DIR=/home/$user
+	fi
+#echo -e "\n\nBackups will be saved to and restored from $DIR"
+fi
+echo -e "\n\nBackups will be saved to and restored from $DIR"
+}
+
+chkdeps() {
+echo "Just one moment - checking dependencies..."
+deps=(pv coreutils zenity)
+for dp in ${deps[@]};do
+ if rpm -q $dp > /dev/null ; then
+    continue
+ else
+    if confirm $dp" is needed - (I)nstall or (S)kip" "[I/S]" "Ii" "Ss";then
+      urpmi $dp
+      if [ $? -gt 0 ];then
+	exit 1
+      fi
+    else
+      continue
+    fi
+  fi
+done
+return 0
+}
+
+do_backup() {
+	loop=1
+	while [[ $loop > 0 ]]; do
+	echo
+		read -p "Enter a name for the backup file (date/time will be appended automatically) " FILE
+		FILE=$FILE"_"$(date +%y%m%d%H%M).gz
+		FILE=$DIR"/"$FILE
+		if confirm "Backup of $DISK will be created as $FILE OK?" "Y/N/Q" "Yy" "Nn" "Qq"; then
+			loop=0; continue
+		elif (( $? == 2 )); then
+			echo -e "\nBye!"; exit 0
+		fi
+	done
+	echo
+	echo "Starting backup, this may take a long time.... please wait!"
+	echo
+		dd bs=32k if=$DISK|pv|gzip > $FILE
+	if [[ $? = 0 ]]; then
+		echo "Backup complete and saved as $FILE"
+		echo "Bye!"
+		exit 0
+	else
+		echo "An error occurred - please record any messages and report"
+	fi
+}
+
+do_restore() {
+    echo
+	read -p "Select the .gz file to restore from now? [Y/N] " -n 1 -r
+	echo
+		if ! [[ $REPLY =~ ^[Yy]$ ]]; then
+			echo "User aborted operation!"
+			exit 1
+		fi
+	loop=1
+	while [[ $loop > 0 ]]; do
+		FILE=$(zenity --file-selection --filename=$DIR/ 2> /dev/null) 
+		if ! [[ -f $FILE ]]; then
+			echo "File not found!"
+			sleep 2
+			continue
+		fi
+		loop=0
+	done
+	read -p "Are you sure you want to restore $FILE to $DISK [Y/N]? " -n 1 -r
+    echo
+	if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+		echo "User aborted operation!"
+    	exit 1
+	fi
+	echo
+	read -p "Are you ABSOLUTELY sure you want to restore $FILE to $DISK [Y/N]? " -n 1 -r
+	echo
+	if [[ ! $REPLY =~ ^[Yy]$ ]]
+	then
+		echo "User aborted operation!"
+    	exit 1
+	fi
+	echo -e "Starting restore, this may take a long time.... please wait!\n"
+	echo "Restoring $FILE"
+	echo "To $DISK"
+		gzip -dc $FILE | dd bs=32k of=$DISK  status=progress
+    if [[ $? = 0 ]]; then
+		echo "Restore complete from file $FILE to $DISK"
+		echo "Bye!"
+		exit 0
+	else
+		echo "An error occurred - please record any messages and report"
+	fi
+}
+
+############## Main routine ##############
+# Check we are root
+clear
+echo "############## Welcome to SD Card Backup Restore ##############"
+(((UID))) && { echo "Must be root to run $0"; exit 0; }
+# Check for required packages
+chkdeps
+get_dir
+detectusb
+if confirm "\nDo you want to (B)ackup (R)estore or (Q)uit?" "B/R/Q" "Bb" "Rr" "Qq"; then
+	echo
+	do_backup
+elif (( $? == 1 )); then
+	echo
+	do_restore
+else
+	echo -e "\nBye!"
+	exit 0
+fi
