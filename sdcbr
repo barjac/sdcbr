@@ -93,14 +93,26 @@ done
 }
 
 get_data_size() {
-# Use fdisk to get used data size in bytes
-BYTES_TO_SAVE=$(fdisk -l $DISK|grep $DISK|grep -v "Disk"|tr -s ' '|cut -d' ' -f3|sort -gr|tr '\n' ' '|cut -d ' ' -f1)
+# bs=64k
+BS=$((64*1024))
+
+# Use fdisk to get used data size in sectors
+SECTORS_TO_SAVE=$(fdisk -l $DISK|grep $DISK|grep -v "Disk"|tr -s ' '|cut -d' ' -f3|sort -gr|tr '\n' ' '|cut -d ' ' -f1)
+((dbg == 1)) &&  echo "Sectors to save = $SECTORS_TO_SAVE"
 
 # Use fdisk to get sector size in bytes
 SECTOR_SIZE=$(fdisk -l $DISK|grep "Units:"|cut -d' ' -f8)
+((dbg == 1)) &&  echo "Sector size = $SECTOR_SIZE"
 
-# Get sectors to save
-SECTORS_TO_SAVE=$(((BYTES_TO_SAVE/SECTOR_SIZE)+SECTOR_SIZE))
+# Get bytes to save
+BYTES_TO_SAVE=$((SECTORS_TO_SAVE*SECTOR_SIZE))
+((dbg == 1)) &&  echo "Bytes to save = $BYTES_TO_SAVE"
+
+# Count plus one block for safety
+COUNT=$(((BYTES_TO_SAVE/BS)+BS))
+((dbg == 1)) &&  echo "Count = $COUNT"
+
+((dbg == 1)) &&  echo "bs = $BS"
 }
 
 get_dir() {
@@ -168,8 +180,8 @@ echo
 echo "Starting backup, this may take a long time.... please wait!"
 echo
 get_data_size
-echo "Count = $SECTORS"
-if dd bs=512 count=$SECTORS_TO_SAVE if="$DISK"|pv|gzip > "$FILE"; then
+echo "Count = $SECTORS_TO_SAVE"
+if dd bs=$BS count=$COUNT if="$DISK"|pv|gzip > "$FILE"; then
     echo "Backup complete and saved as $FILE"
     echo "Bye!"
     exit 0
