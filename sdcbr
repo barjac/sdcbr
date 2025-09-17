@@ -92,6 +92,17 @@ while true; do
 done
 }
 
+get_data_size() {
+# Use fdisk to get used data size in bytes
+BYTES_TO_SAVE=$(fdisk -l $DISK|grep $DISK|grep -v "Disk"|tr -s ' '|cut -d' ' -f3|sort -gr|tr '\n' ' '|cut -d ' ' -f1)
+
+# Use fdisk to get sector size in bytes
+SECTOR_SIZE=$(fdisk -l $DISK|grep "Units:"|cut -d' ' -f8)
+
+# Get sectors to save
+SECTORS_TO_SAVE=$(((BYTES_TO_SAVE/SECTOR_SIZE)+SECTOR_SIZE))
+}
+
 get_dir() {
 user=$(users|grep -v root|cut -d ' ' -f1)
 DIR=
@@ -156,7 +167,9 @@ done
 echo
 echo "Starting backup, this may take a long time.... please wait!"
 echo
-if dd bs=32k if="$DISK"|pv|gzip > "$FILE"; then
+get_data_size
+echo "Count = $SECTORS"
+if dd bs=512 count=$SECTORS_TO_SAVE if="$DISK"|pv|gzip > "$FILE"; then
     echo "Backup complete and saved as $FILE"
     echo "Bye!"
     exit 0
@@ -219,6 +232,7 @@ chkdeps
 get_dir
 # Detect the USB device to work with
 detectusb
+
 if confirm "\nDo you want to (B)ackup (R)estore or (Q)uit?" "B/R/Q" "Bb" "Rr" "Qq"; then
         echo
         do_backup
