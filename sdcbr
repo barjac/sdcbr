@@ -8,7 +8,7 @@
 # Suitable for backing up Raspberry Pi operating system cards.
 #
 ######################
-dbg=0
+dbg=1
 confirm() {
 params=( "$1" "$2" "$3" "$4" "$5" )
 rval=3
@@ -96,7 +96,7 @@ get_data_size() {
 # bs=64k
 BS=$((64*1024))
 
-# Use fdisk to get used data size in sectors
+# Use fdisk to get the highest sector used
 SECTORS_TO_SAVE=$(fdisk -l $DISK|grep $DISK|grep -v "Disk"|tr -s ' '|cut -d' ' -f3|sort -gr|tr '\n' ' '|cut -d ' ' -f1)
 ((dbg == 1)) &&  echo "Sectors to save = $SECTORS_TO_SAVE"
 
@@ -105,20 +105,60 @@ SECTOR_SIZE=$(fdisk -l $DISK|grep "Units:"|cut -d' ' -f8)
 ((dbg == 1)) &&  echo "Sector size = $SECTOR_SIZE"
 
 # Get bytes to save
-BYTES_TO_SAVE=$((SECTORS_TO_SAVE*SECTOR_SIZE))
+BYTES_TO_SAVE=$(((SECTORS_TO_SAVE+1)*SECTOR_SIZE))
 ((dbg == 1)) &&  echo "Bytes to save = $BYTES_TO_SAVE"
 
-# Count plus one block for safety
-COUNT=$(((BYTES_TO_SAVE/BS)+BS))
-((dbg == 1)) &&  echo "Count = $COUNT"
+((dbg == 1)) &&  echo "bs = $BS bytes"
 
-((dbg == 1)) &&  echo "bs = $BS"
+# Count sectors plus one as sectors start at zero
+COUNT=$(((BYTES_TO_SAVE/BS)+BS))
+((dbg == 1)) &&  echo "Count = $COUNT blocks"
+
 }
+
+get_used_blocks() {
+    local DISK=$1
+    local BS=${2:-1M}
+
+    # Get last used sector
+    SECTORS_TO_SAVE=$(fdisk -l "$DISK" | awk '/^\/dev/ {print $3}' | sort -n | tail -1)
+    echo "Last used sector: $SECTORS_TO_SAVE"
+
+    # Get sector size (bytes)
+    SECTOR_SIZE=$(fdisk -l "$DISK" | awk '/Sector size/ {print $4; exit}')
+    echo "Sector size: $SECTOR_SIZE bytes"
+
+    # Calculate total bytes to save (include +1)
+    BYTES_TO_SAVE=$(((SECTORS_TO_SAVE + 1) * SECTOR_SIZE))
+    echo "Total bytes to save: $BYTES_TO_SAVE"
+
+    # Convert BS to bytes (handle 'M' or 'K' suffixes)
+    case "$BS" in
+        *M) BS_BYTES=$(( ${BS%M} * 1048576 )) ;;
+        *K) BS_BYTES=$(( ${BS%K} * 1024 )) ;;
+        *)  BS_BYTES=$BS ;;
+    esac
+    echo "Block size: $BS_BYTES"
+
+    # Round up division to next whole block
+    COUNT=$(( (BYTES_TO_SAVE + BS_BYTES - 1) / BS_BYTES ))
+
+    # Add safety margin (8 MiB)
+    COUNT=$(( COUNT + (8 * 1048576 / BS_BYTES) ))
+
+    echo "Count = $COUNT blocks"
+
+    # Example usage:
+    # dd if=$DISK of=image.img bs=$BS count=$COUNT status=progress conv=sparse
+}
+
 
 get_dir() {
 user=$(users|grep -v root|cut -d ' ' -f1)
+(( DBG )) && echo "User = $user"
 DIR=
-if [[ -f /home/"$user"/.sdcbr_dir ]] && [[ -d $(cat /home/"$user"/.sdcbr_dir) ]]; then
+if [[ -f /home/"$user"/.sdcbr_dir ]]; then
+#&& [[ -d $(cat /home/"$user"/.sdcbr_dir) ]]; then
     DIR=$(cat /home/"$user"/.sdcbr_dir)
 else
     if confirm "Please select a default directory for your backups now OK?" "[Y/N]" "Yy" "Nn"; then
@@ -179,14 +219,17 @@ done
 echo
 echo "Starting backup, this may take a long time.... please wait!"
 echo
-get_data_size
-echo "Count = $SECTORS_TO_SAVE"
-if dd bs=$BS count=$COUNT if="$DISK"|pv|gzip > "$FILE"; then
+
+#get_data_size
+get_used_blocks
+
+echo "Backing up from $DISK: $COUNT blocks of $BS each ($(($COUNT*$BS/1048576)) MiB approx)"
+
+set -o pipefail
+if dd if="$DISK" bs=$BS count=$COUNT iflag=fullblock status=none | pv | gzip > "$FILE"; then
     echo "Backup complete and saved as $FILE"
-    echo "Bye!"
-    exit 0
 else
-    echo "An error occurred - please record any messages and report"
+    echo "Backup failed" >&2
 fi
 }
 
@@ -221,16 +264,22 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "User aborted operation!"
     exit 1
 fi
-echo -e "Starting restore, this may take a long time.... please wait!\n"
+
+set -o pipefail
+echo -e "Starting restore, this may take a long time... please wait!\n"
 echo "Restoring $FILE"
 echo "To $DISK"
-if gzip -dc "$FILE" | dd bs=32k of="$DISK"  status=progress; then
+
+if gzip -dc "$FILE" | dd bs=32k iflag=fullblock of="$DISK" status=progress; then
+    sync
     echo "Restore complete from file $FILE to $DISK"
     echo "Bye!"
     exit 0
 else
-    echo "An error occurred - please record any messages and report"
+    echo "An error occurred - please record any messages and report" >&2
+    exit 1
 fi
+
 }
 
 ############## Main routine ##############
