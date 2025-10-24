@@ -96,18 +96,26 @@ done
 }
 
 get_used_blocks() {
-(( DBG )) && echo "Disk in use: $DISK"
+    echo "Disk in use: $DISK"
     BS=${2:-1M}
 
-    # Get last used sector
-    SECTORS_TO_SAVE=$(fdisk -l "$DISK" | awk '/^\/dev/ {print $3}' | sort -n | tail -1)
+    # Get the highest 'End' sector reliably
+    SECTORS_TO_SAVE=$(fdisk -l "$DISK" | awk -v disk="$DISK" '
+        BEGIN {max=0}
+        $1 ~ disk"[0-9]" {
+            # handle optional boot flag (*)
+            if ($2 == "*") end=$4; else end=$3;
+            if (end > max) max=end;
+        }
+        END {print max}
+    ')
     echo "Last used sector: $SECTORS_TO_SAVE"
 
     # Get sector size (bytes)
     SECTOR_SIZE=$(fdisk -l "$DISK" | awk '/Sector size/ {print $4; exit}')
     echo "Sector size: $SECTOR_SIZE bytes"
 
-    # Calculate total bytes to save (include +1)
+    # Calculate total bytes to save
     BYTES_TO_SAVE=$(((SECTORS_TO_SAVE + 1) * SECTOR_SIZE))
     echo "Total bytes to save: $BYTES_TO_SAVE"
 
@@ -119,13 +127,12 @@ get_used_blocks() {
     esac
     echo "Block size: $BS_BYTES bytes"
 
-    # Round up division to next whole block
+    # Round up division to next whole block + safety margin
     COUNT=$(( (BYTES_TO_SAVE + BS_BYTES - 1) / BS_BYTES ))
-
-    # Add safety margin (8 MiB)
     COUNT=$(( COUNT + (8 * 1048576 / BS_BYTES) ))
     echo "Count: $COUNT blocks"
 }
+
 
 
 get_dir() {
@@ -148,13 +155,10 @@ if confirm "Keep your default backup DIRECTORY as $DIR ?" "N/Y" "Nn" "Yy"; then
     if confirm "\nSave this directory as new default?" "[Y/N]" "Yy" "Nn"; then
         echo "$DIR" > /home/"$user"/.sdcbr_dir
     fi
-#echo -e "\n\nBackups will be saved to and restored from $DIR"
 else
-#[[ -f /home/$user/.sdcbr_dir ]] && DIR=$(cat /home/$user/.sdcbr_dir)
     if (( ${#DIR} == 0 )); then
         DIR=/home/"$user"
     fi
-#echo -e "\n\nBackups will be saved to and restored from $DIR"
 fi
 echo -e "\n\nBackups will be saved to and restored from $DIR"
 }
@@ -179,35 +183,49 @@ return 0
 }
 
 do_backup() {
-loop=1
-while ((loop > 0)); do
+    loop=1
+    while ((loop > 0)); do
+        echo
+        IFS= read -r -p "Enter a name for the backup file (date/time will be appended automatically) " FILE
+        FILE="${FILE}_$(date +%y%m%d%H%M).zst"
+        FILE="${DIR}/${FILE}"
+        if confirm "Backup of $DISK will be created as $FILE OK?" "Y/N/Q" "Yy" "Nn" "Qq"; then
+            loop=0
+            continue
+        elif (( $? == 2 )); then
+            echo -e "\nBye!"
+            exit 0
+        fi
+    done
+
     echo
-    IFS= read -r -p "Enter a name for the backup file (date/time will be appended automatically) " FILE
-    FILE="${FILE}_$(date +%y%m%d%H%M).zst"
-    FILE="${DIR}/${FILE}"
-    if confirm "Backup of $DISK will be created as $FILE OK?" "Y/N/Q" "Yy" "Nn" "Qq"; then
-        loop=0; continue
-    elif (( $? == 2 )); then
-        echo -e "\nBye!"; exit 0
+    echo "Starting backup, this may take a long time.... please wait!"
+    echo
+
+    # -----------------------------
+    # Determine used blocks and size
+    # -----------------------------
+    BS="1M"                 # block size for dd
+    THREADS=$(nproc)        # number of CPU cores
+    get_used_blocks         # sets BYTES_TO_SAVE
+
+    echo "Backing up $DISK to $FILE..."
+    echo "Pipeline: dd if="$DISK" bs="$BS" iflag=fullblock status=progress | zstd -q -T"$THREADS" -19 --check -o $FILE"
+    echo
+
+    # -----------------------------
+    # Smooth backup pipeline
+    # -----------------------------
+    if dd if="$DISK" bs="$BS" iflag=fullblock status=progress | \
+       zstd -q -T"$THREADS" -19 --check -o "$FILE"; then
+        sync
+        echo
+        echo "Backup complete and saved as $FILE"
+    else
+        echo
+        echo "Backup failed!" >&2
+        exit 1
     fi
-done
-echo
-echo "Starting backup, this may take a long time.... please wait!"
-echo
-
-get_used_blocks
-
-BS="1M"               # block size for backup
-THREADS=$(nproc)      # number of CPU cores for compression
-
-echo "Backing up $DISK to $FILE..."
-echo "dd if="$DISK" bs="$BS" iflag=fullblock status=progress | zstd -T"$THREADS" -C19 -o "$FILE""
-
-if dd if="$DISK" bs="$BS" iflag=fullblock status=progress | zstd -T"$THREADS" -C19 -o "$FILE"; then
-    echo "Backup complete and saved as $FILE"
-else
-    echo "Backup failed" >&2
-fi
 }
 
 do_restore() {
@@ -280,7 +298,12 @@ do_restore() {
     echo "Backup file: $FILE"
     echo "Target device: $DISK"
     echo "Block size: $BS"
-    echo "Using decompressor: $([[ "$FILE" == *.gz ]] && echo gzip || echo zstd (multi-core))"
+    echo -n "Using decompressor: "
+        if [[ "$FILE" == *.gz ]]; then
+            echo "gzip"
+        else
+            echo "zstd (multi-core)"
+        fi
     echo
 
     # -----------------------------
