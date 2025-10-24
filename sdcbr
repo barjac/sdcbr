@@ -211,6 +211,12 @@ fi
 }
 
 do_restore() {
+    local VERIFY_MODE=0
+    # Optional argument: --verify
+    if [[ "$1" == "--verify" ]]; then
+        VERIFY_MODE=1
+    fi
+
     # -----------------------------
     # 0️⃣ User confirmations
     # -----------------------------
@@ -218,7 +224,7 @@ do_restore() {
     echo
     [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "User aborted operation!"; exit 1; }
 
-    loop=1
+    local loop=1
     while ((loop > 0)); do
         FILE=$(zenity --file-selection --filename="$DIR"/ 2> /dev/null)
         [[ ! -f "$FILE" ]] && { echo "File not found!"; sleep 2; continue; }
@@ -237,20 +243,26 @@ do_restore() {
     # 1️⃣ Determine decompression command
     # -----------------------------
     case "$FILE" in
-        *.gz)  DECOMP="gzip -dc" ;;
-        *.zst) DECOMP="zstd -d" ;;
-        *) echo "Error: Unknown backup format. Use .gz or .zst"; exit 1 ;;
+        *.gz)  DECOMP="gzip -dc";  VERIFY_CMD="gzip -t" ;;
+        *.zst) DECOMP="zstd -d";   VERIFY_CMD="zstd -t -q" ;;
+        *) echo "Error: Unknown backup format (.gz or .zst only)"; exit 1 ;;
     esac
 
+    echo "Verifying backup file integrity..."
+    if ! $VERIFY_CMD "$FILE" >/dev/null 2>&1; then
+        echo "Integrity test FAILED — file is corrupt or incomplete!" >&2
+        exit 1
+    fi
+    echo "Integrity OK."
+
     # -----------------------------
-    # 2️⃣ Determine image size
+    # 2️⃣ Determine image size for block tuning
     # -----------------------------
     if [[ "$FILE" == *.gz ]]; then
         IMG_SIZE_BYTES=$(gzip -l "$FILE" | awk 'NR==2 {print $2}')
     elif [[ "$FILE" == *.zst ]]; then
         IMG_SIZE_BYTES=$(zstd -lv "$FILE" 2>/dev/null | awk '/Decompressed Size/ {gsub(/[^0-9]/,"",$3); print $3; exit}')
     fi
-
     [[ -z "$IMG_SIZE_BYTES" ]] && IMG_SIZE_BYTES=$((8*1024*1024*1024))  # fallback 8 GB
 
     # -----------------------------
@@ -264,39 +276,78 @@ do_restore() {
         BS="4M"
     fi
 
-    echo -e "Starting restore...\n"
+    echo
     echo "Backup file: $FILE"
     echo "Target device: $DISK"
-    echo "Estimated decompressed size: $((IMG_SIZE_BYTES / 1024 / 1024 / 1024)) GB"
     echo "Block size: $BS"
     echo "Using decompressor: $([[ "$FILE" == *.gz ]] && echo gzip || echo zstd (multi-core))"
     echo
 
     # -----------------------------
-    # 4️⃣ Restore pipeline with clean progress and failure detection
+    # 4️⃣ Restore pipeline with clean progress
     # -----------------------------
     set -o pipefail
+    echo "Starting decompression and restore... (this may take a few seconds to begin)"
+    echo
 
     if [[ "$FILE" == *.zst ]]; then
-        if $DECOMP "$FILE" -c -T0 | pv -N "Restoring" | dd bs="$BS" iflag=fullblock of="$DISK" status=none; then
-            sync
-            echo "Restore complete from $FILE to $DISK"
-        else
+        if ! $DECOMP "$FILE" -c -T0 | pv -N "Restoring" | dd bs="$BS" iflag=fullblock of="$DISK" status=none; then
             echo "Restore failed! Check SD card and backup integrity." >&2
             exit 1
         fi
     else
-        if $DECOMP "$FILE" | pv -N "Restoring" | dd bs="$BS" iflag=fullblock of="$DISK" status=none; then
-            sync
-            echo "Restore complete from $FILE to $DISK"
-        else
+        if ! $DECOMP "$FILE" | pv -N "Restoring" | dd bs="$BS" iflag=fullblock of="$DISK" status=none; then
             echo "Restore failed! Check SD card and backup integrity." >&2
             exit 1
         fi
     fi
+
+    sync
+    echo "Restore complete from $FILE to $DISK"
+
+    # -----------------------------
+    # 5️⃣ Optional post-restore spot check
+    # -----------------------------
+    if (( VERIFY_MODE )); then
+        VERIFY_BYTES=$((1*1024*1024))  # 1 MB slices
+        TMPDIR=$(mktemp -d)
+        echo
+        echo "Performing automatic post-restore integrity check..."
+        echo "Verifying first and last $((VERIFY_BYTES/1024)) KB of restored image..."
+
+        # First slice from backup
+        if [[ "$FILE" == *.zst ]]; then
+            $DECOMP "$FILE" -c -T0 | dd bs=1M count=1 of="$TMPDIR/beg_ref.bin" status=none
+            $DECOMP "$FILE" -c -T0 | tail -c "$VERIFY_BYTES" > "$TMPDIR/end_ref.bin"
+        else
+            gzip -dc "$FILE" | dd bs=1M count=1 of="$TMPDIR/beg_ref.bin" status=none
+            gzip -dc "$FILE" | tail -c "$VERIFY_BYTES" > "$TMPDIR/end_ref.bin"
+        fi
+
+        # First and last slice from restored device
+        dd if="$DISK" bs=1M count=1 iflag=fullblock of="$TMPDIR/beg_dev.bin" status=none
+        OFFSET=$((BYTES_TO_SAVE - VERIFY_BYTES))
+        dd if="$DISK" bs=1 count="$VERIFY_BYTES" skip="$OFFSET" iflag=skip_bytes,count_bytes \
+            of="$TMPDIR/end_dev.bin" status=none
+
+        # Compare hashes
+        REF_BEG=$(sha256sum "$TMPDIR/beg_ref.bin" | awk '{print $1}')
+        DEV_BEG=$(sha256sum "$TMPDIR/beg_dev.bin" | awk '{print $1}')
+        REF_END=$(sha256sum "$TMPDIR/end_ref.bin" | awk '{print $1}')
+        DEV_END=$(sha256sum "$TMPDIR/end_dev.bin" | awk '{print $1}')
+
+        echo "Start  : $( [[ "$REF_BEG" == "$DEV_BEG" ]] && echo "OK" || echo "MISMATCH!" )"
+        echo "End    : $( [[ "$REF_END" == "$DEV_END" ]] && echo "OK" || echo "MISMATCH!" )"
+
+        if [[ "$REF_BEG" == "$DEV_BEG" && "$REF_END" == "$DEV_END" ]]; then
+            echo "✅ Quick post-restore integrity check PASSED"
+        else
+            echo "⚠️  Warning: Mismatch detected! The restore may be incomplete or corrupted."
+        fi
+
+        rm -rf "$TMPDIR"
+    fi
 }
-
-
 
 ############## Main routine ##############
 clear
@@ -315,7 +366,7 @@ if confirm "\nDo you want to (B)ackup (R)estore or (Q)uit?" "B/R/Q" "Bb" "Rr" "Q
         do_backup
 elif (( $? == 1 )); then
         echo
-        do_restore
+        do_restore --verify
 else
         echo -e "\nBye!"
         exit 0
