@@ -10,7 +10,7 @@
 ######################
 #set -x
 set -o pipefail
-DBG=1
+DBG=true
 
 confirm() {
 params=( "$1" "$2" "$3" "$4" "$5" )
@@ -96,30 +96,37 @@ done
 }
 
 get_used_blocks() {
-    echo "Disk in use: $DISK"
+    echo "Scanning disk $DISK -"
     BS=${2:-1M}
 
-    # Get the highest 'End' sector reliably
-    SECTORS_TO_SAVE=$(fdisk -l "$DISK" | awk -v disk="$DISK" '
-        BEGIN {max=0}
-        $1 ~ disk"[0-9]" {
-            # handle optional boot flag (*)
-            if ($2 == "*") end=$4; else end=$3;
-            if (end > max) max=end;
-        }
-        END {print max}
-    ')
-    echo "Last used sector: $SECTORS_TO_SAVE"
-
-    # Get sector size (bytes)
-    SECTOR_SIZE=$(fdisk -l "$DISK" | awk '/Sector size/ {print $4; exit}')
+    # Get sector size
+    SECTOR_SIZE=$(cat /sys/block/"$(basename "$DISK")"/queue/hw_sector_size 2>/dev/null || echo 512)
     echo "Sector size: $SECTOR_SIZE bytes"
 
-    # Calculate total bytes to save
-    BYTES_TO_SAVE=$(((SECTORS_TO_SAVE + 1) * SECTOR_SIZE))
-    echo "Total bytes to save: $BYTES_TO_SAVE"
+    # Get partition info (children of $DISK)
+    PARTS=$(lsblk -rno NAME,TYPE | awk -v d="$(basename "$DISK")" '$2=="part" && $1~d {print $1}')
 
-    # Convert BS to bytes (handle 'M' or 'K' suffixes)
+    if [[ -z "$PARTS" ]]; then
+        echo "No partitions found, using full device"
+        LAST_END_SECTOR=$(($(lsblk -b -n -d -o SIZE "$DISK") / SECTOR_SIZE - 1))
+    else
+        echo "Found partitions: $(echo $PARTS | tr '\n' ' ')"
+        LAST_END_SECTOR=0
+        for p in $PARTS; do
+            START=$(cat /sys/class/block/$p/start 2>/dev/null || echo 0)
+            SIZE=$(cat /sys/class/block/$p/size 2>/dev/null || echo 0)
+            END=$((START + SIZE - 1))
+            ((END > LAST_END_SECTOR)) && LAST_END_SECTOR=$END
+        done
+    fi
+
+    echo "Last used sector: $LAST_END_SECTOR"
+
+    # Compute total bytes to save
+    TOTAL_BYTES=$(((LAST_END_SECTOR + 1) * SECTOR_SIZE))
+    echo "Total bytes to save: $TOTAL_BYTES"
+
+    # Convert block size to bytes
     case "$BS" in
         *M) BS_BYTES=$(( ${BS%M} * 1048576 )) ;;
         *K) BS_BYTES=$(( ${BS%K} * 1024 )) ;;
@@ -127,12 +134,11 @@ get_used_blocks() {
     esac
     echo "Block size: $BS_BYTES bytes"
 
-    # Round up division to next whole block + safety margin
-    COUNT=$(( (BYTES_TO_SAVE + BS_BYTES - 1) / BS_BYTES ))
+    # Round up and add safety margin
+    COUNT=$(( (TOTAL_BYTES + BS_BYTES - 1) / BS_BYTES ))
     COUNT=$(( COUNT + (8 * 1048576 / BS_BYTES) ))
     echo "Count: $COUNT blocks"
 }
-
 
 
 get_dir() {
@@ -184,11 +190,12 @@ return 0
 
 do_backup() {
     loop=1
-    while ((loop > 0)); do
+    while (( loop > 0 )); do
         echo
-        IFS= read -r -p "Enter a name for the backup file (date/time will be appended automatically) " FILE
+        IFS= read -r -p "Enter a name for the backup file (date/time will be appended automatically): " FILE
         FILE="${FILE}_$(date +%y%m%d%H%M).zst"
         FILE="${DIR}/${FILE}"
+
         if confirm "Backup of $DISK will be created as $FILE OK?" "Y/N/Q" "Yy" "Nn" "Qq"; then
             loop=0
             continue
@@ -199,24 +206,26 @@ do_backup() {
     done
 
     echo
-    echo "Starting backup, this may take a long time.... please wait!"
+    echo "Starting backup, this may take a while... please wait!"
     echo
 
+    BS="1M"                 # default block size
+    THREADS=$(nproc)        # CPU cores for compression
+
     # -----------------------------
-    # Determine used blocks and size
+    # 1️⃣ Determine used blocks
     # -----------------------------
-    BS="1M"                 # block size for dd
-    THREADS=$(nproc)        # number of CPU cores
-    get_used_blocks         # sets BYTES_TO_SAVE
+    get_used_blocks "$DISK" "$BS"
 
     echo "Backing up $DISK to $FILE..."
-    echo "Pipeline: dd if="$DISK" bs="$BS" iflag=fullblock status=progress | zstd -q -T"$THREADS" -19 --check -o $FILE"
-    echo
+    echo "Block size: $BS"
+    echo "Blocks to copy: $COUNT"
+    echo "Using $THREADS threads for compression"
 
     # -----------------------------
-    # Smooth backup pipeline
+    # 2️⃣ Backup pipeline
     # -----------------------------
-    if dd if="$DISK" bs="$BS" iflag=fullblock status=progress | \
+    if dd if="$DISK" bs="$BS" count="$COUNT" iflag=fullblock status=progress | \
        zstd -q -T"$THREADS" -19 --check -o "$FILE"; then
         sync
         echo
@@ -227,6 +236,7 @@ do_backup() {
         exit 1
     fi
 }
+
 
 do_restore() {
     local VERIFY_MODE=0
