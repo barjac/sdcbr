@@ -284,7 +284,34 @@ do_restore() {
     echo "Integrity OK."
 
     # -----------------------------
-    # 2️⃣ Determine image size for block tuning
+    # 2️⃣ Pre-restore size check: read partition table from backup header
+    # -----------------------------
+    TMP_HDR=$(mktemp)
+    if [[ "$FILE" == *.zst ]]; then
+        $DECOMP "$FILE" -c -T0 2>/dev/null | dd bs=1M count=1 iflag=fullblock of="$TMP_HDR" status=none 2>/dev/null || true
+    else
+        gzip -dc "$FILE" 2>/dev/null | dd bs=1M count=1 iflag=fullblock of="$TMP_HDR" status=none 2>/dev/null || true
+    fi
+    BACKUP_LAST_SECTOR=$(sfdisk -l "$TMP_HDR" 2>/dev/null | awk '
+        /^\// { for(i=1;i<=NF;i++) if($i~/^[0-9]+$/ && $i+0>m) m=$i+0 }
+        END   { print m+0 }')
+    rm -f "$TMP_HDR"
+    DEV_BYTES=$(lsblk -b -n -d -o SIZE "$DISK" 2>/dev/null)
+    if [[ -n "$BACKUP_LAST_SECTOR" && "$BACKUP_LAST_SECTOR" -gt 0 && -n "$DEV_BYTES" ]]; then
+        NEEDED_BYTES=$(( (BACKUP_LAST_SECTOR + 1) * 512 ))
+        echo "Backup requires: ~$((NEEDED_BYTES / 1000000000)) GB"
+        echo "Device $DISK has:  $((DEV_BYTES / 1000000000)) GB"
+        if (( NEEDED_BYTES > DEV_BYTES )); then
+            echo "ERROR: $DISK is too small for this backup — aborting." >&2
+            exit 1
+        fi
+        if ! confirm "Size OK. Proceed with restore?" "[Y/N]" "Yy" "Nn"; then
+            echo -e "\nAborted."; exit 0
+        fi
+    fi
+
+    # -----------------------------
+    # 3️⃣ Determine image size for block tuning
     # -----------------------------
     if [[ "$FILE" == *.gz ]]; then
         IMG_SIZE_BYTES=$(gzip -l "$FILE" | awk 'NR==2 {print $2}')
@@ -294,7 +321,7 @@ do_restore() {
     [[ -z "$IMG_SIZE_BYTES" ]] && IMG_SIZE_BYTES=$((8*1024*1024*1024))  # fallback 8 GB
 
     # -----------------------------
-    # 3️⃣ Pick block size
+    # 4️⃣ Pick block size
     # -----------------------------
     if (( IMG_SIZE_BYTES < 4*1024*1024*1024 )); then
         BS="1M"
@@ -317,7 +344,7 @@ do_restore() {
     echo
 
     # -----------------------------
-    # 4️⃣ Restore pipeline with clean progress
+    # 5️⃣ Restore pipeline with clean progress
     # -----------------------------
     set -o pipefail
     echo "Starting decompression and restore... (this may take a few seconds to begin)"
@@ -344,7 +371,7 @@ do_restore() {
     echo "Restore complete from $FILE to $DISK"
 
     # -----------------------------
-    # 5️⃣ Optional post-restore spot check
+    # 6️⃣ Optional post-restore spot check
     # -----------------------------
     if (( VERIFY_MODE )); then
         VERIFY_BYTES=$((1*1024*1024))  # 1 MB slices
