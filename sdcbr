@@ -348,18 +348,28 @@ do_restore() {
         echo "Performing automatic post-restore integrity check..."
         echo "Verifying first and last $((VERIFY_BYTES/1024)) KB of restored image..."
 
-        # First slice from backup
+        # Single decompression pass: capture first 1MB, last 1MB, and exact byte count
         if [[ "$FILE" == *.zst ]]; then
-            $DECOMP "$FILE" -c -T0 | dd bs=1M count=1 iflag=fullblock of="$VERIFY_TMP/beg_ref.bin" status=none
-            $DECOMP "$FILE" -c -T0 | tail -c "$VERIFY_BYTES" > "$VERIFY_TMP/end_ref.bin"
+            ACTUAL_SIZE=$(
+                set +o pipefail
+                $DECOMP "$FILE" -c -T0 | \
+                    tee >(dd bs=1M count=1 iflag=fullblock of="$VERIFY_TMP/beg_ref.bin" status=none 2>/dev/null) | \
+                    tee >(tail -c "$VERIFY_BYTES" > "$VERIFY_TMP/end_ref.bin") | \
+                    wc -c
+            )
         else
-            gzip -dc "$FILE" | dd bs=1M count=1 iflag=fullblock of="$VERIFY_TMP/beg_ref.bin" status=none
-            gzip -dc "$FILE" | tail -c "$VERIFY_BYTES" > "$VERIFY_TMP/end_ref.bin"
+            ACTUAL_SIZE=$(
+                set +o pipefail
+                gzip -dc "$FILE" | \
+                    tee >(dd bs=1M count=1 iflag=fullblock of="$VERIFY_TMP/beg_ref.bin" status=none 2>/dev/null) | \
+                    tee >(tail -c "$VERIFY_BYTES" > "$VERIFY_TMP/end_ref.bin") | \
+                    wc -c
+            )
         fi
 
         # First and last slice from restored device
         dd if="$DISK" bs=1M count=1 iflag=fullblock of="$VERIFY_TMP/beg_dev.bin" status=none
-        OFFSET=$((IMG_SIZE_BYTES - VERIFY_BYTES))
+        OFFSET=$((ACTUAL_SIZE - VERIFY_BYTES))
         dd if="$DISK" bs=1 count="$VERIFY_BYTES" skip="$OFFSET" iflag=skip_bytes,count_bytes \
             of="$VERIFY_TMP/end_dev.bin" status=none
 
