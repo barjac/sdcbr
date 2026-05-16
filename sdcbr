@@ -323,11 +323,12 @@ do_restore() {
     [[ -z "$IMG_SIZE_BYTES" ]] && IMG_SIZE_BYTES=$((8*1024*1024*1024))  # fallback 8 GB
 
     # -----------------------------
-    # 4️⃣ Pick block size
+    # 4️⃣ Pick block size (prefer NEEDED_BYTES from partition table; fall back to IMG_SIZE_BYTES)
     # -----------------------------
-    if (( IMG_SIZE_BYTES < 4*1024*1024*1024 )); then
+    _BS_REF=${NEEDED_BYTES:-$IMG_SIZE_BYTES}
+    if (( _BS_REF < 4*1024*1024*1024 )); then
         BS="1M"
-    elif (( IMG_SIZE_BYTES < 16*1024*1024*1024 )); then
+    elif (( _BS_REF < 16*1024*1024*1024 )); then
         BS="2M"
     else
         BS="4M"
