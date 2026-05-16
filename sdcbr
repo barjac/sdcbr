@@ -335,6 +335,11 @@ do_restore() {
         fi
     fi
 
+    if (( VERIFY_MODE )); then
+        echo
+        echo "Performing automatic post-restore integrity check..."
+        echo "Syncing writes to device..."
+    fi
     sync
     echo "Restore complete from $FILE to $DISK"
 
@@ -344,8 +349,6 @@ do_restore() {
     if (( VERIFY_MODE )); then
         VERIFY_BYTES=$((1*1024*1024))  # 1 MB slices
         VERIFY_TMP=$(mktemp -d)
-        echo
-        echo "Performing automatic post-restore integrity check..."
         echo "Verifying first and last $((VERIFY_BYTES/1024)) KB of restored image..."
 
         # Single decompression pass: capture first 1MB, last 1MB, and exact byte count
