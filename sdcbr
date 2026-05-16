@@ -343,31 +343,31 @@ do_restore() {
     # -----------------------------
     if (( VERIFY_MODE )); then
         VERIFY_BYTES=$((1*1024*1024))  # 1 MB slices
-        TMPDIR=$(mktemp -d)
+        VERIFY_TMP=$(mktemp -d)
         echo
         echo "Performing automatic post-restore integrity check..."
         echo "Verifying first and last $((VERIFY_BYTES/1024)) KB of restored image..."
 
         # First slice from backup
         if [[ "$FILE" == *.zst ]]; then
-            $DECOMP "$FILE" -c -T0 | dd bs=1M count=1 of="$TMPDIR/beg_ref.bin" status=none
-            $DECOMP "$FILE" -c -T0 | tail -c "$VERIFY_BYTES" > "$TMPDIR/end_ref.bin"
+            $DECOMP "$FILE" -c -T0 | dd bs=1M count=1 of="$VERIFY_TMP/beg_ref.bin" status=none
+            $DECOMP "$FILE" -c -T0 | tail -c "$VERIFY_BYTES" > "$VERIFY_TMP/end_ref.bin"
         else
-            gzip -dc "$FILE" | dd bs=1M count=1 of="$TMPDIR/beg_ref.bin" status=none
-            gzip -dc "$FILE" | tail -c "$VERIFY_BYTES" > "$TMPDIR/end_ref.bin"
+            gzip -dc "$FILE" | dd bs=1M count=1 of="$VERIFY_TMP/beg_ref.bin" status=none
+            gzip -dc "$FILE" | tail -c "$VERIFY_BYTES" > "$VERIFY_TMP/end_ref.bin"
         fi
 
         # First and last slice from restored device
-        dd if="$DISK" bs=1M count=1 iflag=fullblock of="$TMPDIR/beg_dev.bin" status=none
-        OFFSET=$((BYTES_TO_SAVE - VERIFY_BYTES))
+        dd if="$DISK" bs=1M count=1 iflag=fullblock of="$VERIFY_TMP/beg_dev.bin" status=none
+        OFFSET=$((IMG_SIZE_BYTES - VERIFY_BYTES))
         dd if="$DISK" bs=1 count="$VERIFY_BYTES" skip="$OFFSET" iflag=skip_bytes,count_bytes \
-            of="$TMPDIR/end_dev.bin" status=none
+            of="$VERIFY_TMP/end_dev.bin" status=none
 
         # Compare hashes
-        REF_BEG=$(sha256sum "$TMPDIR/beg_ref.bin" | awk '{print $1}')
-        DEV_BEG=$(sha256sum "$TMPDIR/beg_dev.bin" | awk '{print $1}')
-        REF_END=$(sha256sum "$TMPDIR/end_ref.bin" | awk '{print $1}')
-        DEV_END=$(sha256sum "$TMPDIR/end_dev.bin" | awk '{print $1}')
+        REF_BEG=$(sha256sum "$VERIFY_TMP/beg_ref.bin" | awk '{print $1}')
+        DEV_BEG=$(sha256sum "$VERIFY_TMP/beg_dev.bin" | awk '{print $1}')
+        REF_END=$(sha256sum "$VERIFY_TMP/end_ref.bin" | awk '{print $1}')
+        DEV_END=$(sha256sum "$VERIFY_TMP/end_dev.bin" | awk '{print $1}')
 
         echo "Start  : $( [[ "$REF_BEG" == "$DEV_BEG" ]] && echo "OK" || echo "MISMATCH!" )"
         echo "End    : $( [[ "$REF_END" == "$DEV_END" ]] && echo "OK" || echo "MISMATCH!" )"
@@ -378,7 +378,7 @@ do_restore() {
             echo "⚠️  Warning: Mismatch detected! The restore may be incomplete or corrupted."
         fi
 
-        rm -rf "$TMPDIR"
+        rm -rf "$VERIFY_TMP"
     fi
 }
 
