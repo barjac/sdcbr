@@ -288,11 +288,11 @@ do_restore() {
     # -----------------------------
     TMP_HDR=$(mktemp)
     if [[ "$FILE" == *.zst ]]; then
-        $DECOMP "$FILE" -c -T0 2>/dev/null | dd bs=1M count=1 iflag=fullblock of="$TMP_HDR" status=none 2>/dev/null || true
+        zstd -d "$FILE" -c -T1 </dev/null 2>/dev/null | dd bs=512 count=1 of="$TMP_HDR" status=none 2>/dev/null || true
     else
-        gzip -dc "$FILE" 2>/dev/null | dd bs=1M count=1 iflag=fullblock of="$TMP_HDR" status=none 2>/dev/null || true
+        gzip -dc "$FILE" </dev/null 2>/dev/null | dd bs=512 count=1 of="$TMP_HDR" status=none 2>/dev/null || true
     fi
-    BACKUP_LAST_SECTOR=$(sfdisk -l "$TMP_HDR" 2>/dev/null | awk '
+    BACKUP_LAST_SECTOR=$(sfdisk -l "$TMP_HDR" </dev/null 2>/dev/null | awk '
         /^\// { for(i=1;i<=NF;i++) if($i~/^[0-9]+$/ && $i+0>m) m=$i+0 }
         END   { print m+0 }')
     rm -f "$TMP_HDR"
