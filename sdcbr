@@ -289,7 +289,7 @@ do_restore() {
     if [[ "$FILE" == *.gz ]]; then
         IMG_SIZE_BYTES=$(gzip -l "$FILE" | awk 'NR==2 {print $2}')
     elif [[ "$FILE" == *.zst ]]; then
-        IMG_SIZE_BYTES=$(zstd -lv "$FILE" 2>/dev/null | awk '/Decompressed Size/ {gsub(/[^0-9]/,"",$3); print $3; exit}')
+        IMG_SIZE_BYTES=$(zstd -lv "$FILE" 2>/dev/null | awk 'tolower($0) ~ /decompressed/ { for(i=1;i<=NF;i++) { v=$i; gsub(/[^0-9]/,"",v); if(v+0>1000000000) { print v+0; exit } } }')
     fi
     [[ -z "$IMG_SIZE_BYTES" ]] && IMG_SIZE_BYTES=$((8*1024*1024*1024))  # fallback 8 GB
 
@@ -350,10 +350,10 @@ do_restore() {
 
         # First slice from backup
         if [[ "$FILE" == *.zst ]]; then
-            $DECOMP "$FILE" -c -T0 | dd bs=1M count=1 of="$VERIFY_TMP/beg_ref.bin" status=none
+            $DECOMP "$FILE" -c -T0 | dd bs=1M count=1 iflag=fullblock of="$VERIFY_TMP/beg_ref.bin" status=none
             $DECOMP "$FILE" -c -T0 | tail -c "$VERIFY_BYTES" > "$VERIFY_TMP/end_ref.bin"
         else
-            gzip -dc "$FILE" | dd bs=1M count=1 of="$VERIFY_TMP/beg_ref.bin" status=none
+            gzip -dc "$FILE" | dd bs=1M count=1 iflag=fullblock of="$VERIFY_TMP/beg_ref.bin" status=none
             gzip -dc "$FILE" | tail -c "$VERIFY_BYTES" > "$VERIFY_TMP/end_ref.bin"
         fi
 
