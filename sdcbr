@@ -299,8 +299,10 @@ do_restore() {
     DEV_BYTES=$(lsblk -b -n -d -o SIZE "$DISK" 2>/dev/null)
     if [[ -n "$BACKUP_LAST_SECTOR" && "$BACKUP_LAST_SECTOR" -gt 0 && -n "$DEV_BYTES" ]]; then
         NEEDED_BYTES=$(( (BACKUP_LAST_SECTOR + 1) * 512 ))
-        echo "Backup requires: ~$((NEEDED_BYTES / 1000000000)) GB"
-        echo "Device $DISK has:  $((DEV_BYTES / 1000000000)) GB"
+        printf "Backup requires: ~%d.%d GB\n" \
+            $((NEEDED_BYTES / 1000000000)) $((NEEDED_BYTES % 1000000000 / 100000000))
+        printf "Device %s has:   %d.%d GB\n" \
+            "$DISK" $((DEV_BYTES / 1000000000)) $((DEV_BYTES % 1000000000 / 100000000))
         if (( NEEDED_BYTES > DEV_BYTES )); then
             echo "ERROR: $DISK is too small for this backup — aborting." >&2
             exit 1
