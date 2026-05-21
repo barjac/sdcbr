@@ -3,7 +3,13 @@
 
 Backs up an SD card or Flash drive interactively as a compressed image.
 
-Restores a previously backed up compressed image to a similar size or larger device.
+Restores a previously backed up compressed image to a device large enough for the data.
+The data and target device are compared and restore not started if the data is too large
+for the target device in use. This means that data backed up from a 64GB SD card for example
+may restore to a 32GB card if the original media was only half full.
+
+The compression used is now zst but sdcbr is backward compatible with the earlier version
+backups.
 
 Suitable for backing up Raspberry Pi and similar operating system cards.
 
