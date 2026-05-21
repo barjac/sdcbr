@@ -169,23 +169,89 @@ fi
 echo -e "\n\nBackups will be saved to and restored from $DIR"
 }
 
-chkdeps() {
-echo "Just one moment - checking dependencies..."
-deps=(pv coreutils zenity)
-for dp in "${deps[@]}";do
-    if rpm -q "$dp" > /dev/null ; then
-        continue
-    else
-        if confirm "${dp} is not installed - (I)nstall or (S)kip" "[I/S]" "Ii" "Ss";then
-            if urpmi "$dp"; then
-                exit 1
+detect_distro() {
+    [[ -f /etc/os-release ]] || { echo "Cannot detect distro: /etc/os-release not found"; exit 1; }
+    . /etc/os-release
+
+    case "$ID" in
+        mageia)
+            PKG_CHECK="rpm -q"
+            PKG_INSTALL="urpmi --auto"
+            ;;
+        opensuse-tumbleweed|opensuse-leap)
+            PKG_CHECK="rpm -q"
+            PKG_INSTALL="zypper install -y"
+            ;;
+        fedora)
+            PKG_CHECK="rpm -q"
+            local fc_ver
+            fc_ver=$(echo "$VERSION_ID" | cut -d. -f1)
+            if (( fc_ver >= 42 )); then
+                PKG_INSTALL="dnf5 install -y"
+            else
+                PKG_INSTALL="dnf install -y"
             fi
-        else
+            ;;
+        ubuntu|debian|linuxmint|lmde)
+            PKG_CHECK="dpkg -s"
+            PKG_INSTALL="apt-get install -y"
+            ;;
+        arch|garuda|endeavouros|arcolinux|rebornos|ml4wos|manjaro)
+            PKG_CHECK="pacman -Q"
+            PKG_INSTALL="pacman -S --noconfirm"
+            ;;
+        pclinuxos)
+            PKG_CHECK="dpkg -s"
+            PKG_INSTALL="apt-get install -y"
+            ;;
+        gentoo)
+            PKG_CHECK="qlist -I"
+            PKG_INSTALL="emerge"
+            ;;
+        *)
+            # Fallback: infer from ID_LIKE for derivative distros
+            case "${ID_LIKE:-}" in
+                *debian*|*ubuntu*)
+                    PKG_CHECK="dpkg -s"
+                    PKG_INSTALL="apt-get install -y"
+                    ;;
+                *fedora*|*rhel*|*centos*)
+                    PKG_CHECK="rpm -q"
+                    PKG_INSTALL="dnf install -y"
+                    ;;
+                *suse*)
+                    PKG_CHECK="rpm -q"
+                    PKG_INSTALL="zypper install -y"
+                    ;;
+                *arch*)
+                    PKG_CHECK="pacman -Q"
+                    PKG_INSTALL="pacman -S --noconfirm"
+                    ;;
+                *)
+                    echo "Unsupported distro: ${PRETTY_NAME:-unknown}. Please report at https://github.com/barjac/sdcbr/issues"
+                    exit 1
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+chkdeps() {
+    echo "Just one moment - checking dependencies..."
+    detect_distro
+    deps=(pv coreutils zenity)
+    for dp in "${deps[@]}"; do
+        if $PKG_CHECK "$dp" > /dev/null 2>&1; then
             continue
         fi
-    fi
-done
-return 0
+        if confirm "${dp} is not installed - (I)nstall or (S)kip" "[I/S]" "Ii" "Ss"; then
+            if ! $PKG_INSTALL "$dp"; then
+                echo "Failed to install ${dp}"
+                exit 1
+            fi
+        fi
+    done
+    return 0
 }
 
 do_backup() {
